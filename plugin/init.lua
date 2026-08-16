@@ -1,4 +1,4 @@
--- claude-quota.wezterm
+-- quotabar.wezterm
 -- Claude Code usage quota in the WezTerm status bar.
 --
 -- Works on macOS, Linux, native Windows, and Windows-hosting-WSL, which is the
@@ -174,7 +174,7 @@ local function call_api(token)
     "-H", "Authorization: Bearer " .. token,
     "-H", "anthropic-beta: oauth-2025-04-20",
     "-H", "Content-Type: application/json",
-    "-H", "User-Agent: claude-quota.wezterm",
+    "-H", "User-Agent: quotabar.wezterm",
   })
   if not ok or not stdout or stdout == "" then
     return nil, nil, "curl failed"
@@ -391,10 +391,10 @@ function M.apply_to_config(c, opts)
     table.insert(keys, {
       key = config.dashboard_key.key,
       mods = config.dashboard_key.mods,
-      action = wezterm.action.EmitEvent("claude-quota-dashboard"),
+      action = wezterm.action.EmitEvent("quotabar-dashboard"),
     })
     c.keys = keys
-    wezterm.on("claude-quota-dashboard", function()
+    wezterm.on("quotabar-dashboard", function()
       wezterm.open_with(DASHBOARD_URL)
     end)
   end
@@ -412,7 +412,7 @@ function M.apply_to_config(c, opts)
       end
     end)
     if not ok then
-      wezterm.log_error("claude-quota: " .. tostring(err))
+      wezterm.log_error("quotabar: " .. tostring(err))
     end
   end)
 end

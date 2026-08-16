@@ -1,4 +1,4 @@
-# claude-quota.wezterm
+# quotabar.wezterm
 
 Claude Code usage quota in the WezTerm status bar.
 
@@ -19,7 +19,7 @@ Claude Code usage quota in the WezTerm status bar.
 local wezterm = require("wezterm")
 local config = wezterm.config_builder()
 
-local quota = wezterm.plugin.require("https://github.com/TahiriAbdou/claude-quota.wezterm")
+local quota = wezterm.plugin.require("https://github.com/TahiriAbdou/quotabar.wezterm")
 quota.apply_to_config(config)
 
 return config
