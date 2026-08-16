@@ -305,6 +305,12 @@ local function build_status(data)
     return icon .. fg(config.colors.crit) .. tostring(data.error) .. RESET
   end
 
+  -- Neither window present means the response was not the shape we expect.
+  -- Say so, rather than rendering a confident 0%.
+  if type(data.five_hour) ~= "table" and type(data.seven_day) ~= "table" then
+    return icon .. fg(config.colors.crit) .. "no data" .. RESET
+  end
+
   local five = data.five_hour or {}
   local seven = data.seven_day or {}
   local five_pct = five.utilization or 0
@@ -421,6 +427,7 @@ end
 M._internal = {
   resolve_credentials = resolve_credentials,
   wsl_home = wsl_home,
+  fetch = fetch,
   seconds_until = seconds_until,
   fmt_duration = fmt_duration,
   record_sample = record_sample,
