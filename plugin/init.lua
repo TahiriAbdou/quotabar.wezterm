@@ -47,7 +47,9 @@ local last_error = nil
 local handler_registered = false
 local cred_path_cache = nil
 local wsl_home_cache = nil
-local history = {}   -- { {t = epoch, pct = number}, ... } for the 5h window
+local history = {}       -- { {t = epoch, pct = number}, ... } for the 5h window
+local retry_until = 0    -- epoch before which we must not call the API again
+local error_streak = 0
 
 -- ------------------------------------------------------------- utilities --
 
@@ -69,6 +71,54 @@ local function read_file(path)
   local content = f:read("*a")
   f:close()
   return content
+end
+
+-- ----------------------------------------------------------------- cache --
+
+-- WezTerm re-evaluates the config on every reload, which re-requires this
+-- module and resets the in-memory state above. Without an on-disk cache each
+-- reload would fire a fresh API call, and a run of reloads earns a 429. The
+-- backoff deadline is persisted too, so a reload cannot bypass it.
+local function cache_path()
+  local home = wezterm.home_dir or os.getenv("HOME") or os.getenv("USERPROFILE")
+  if not home then return nil end
+  return home .. "/.cache-quotabar.json"
+end
+
+local function read_cache()
+  local p = cache_path()
+  if not p then return nil end
+  local raw = read_file(p)
+  if not raw then return nil end
+  local ok, parsed = pcall(wezterm.json_parse, raw)
+  if not ok or type(parsed) ~= "table" then return nil end
+  return parsed
+end
+
+local function write_cache(payload)
+  local p = cache_path()
+  if not p then return end
+  local ok, encoded = pcall(wezterm.json_encode, payload)
+  if not ok then return end
+  local f = io.open(p, "w")
+  if not f then return end
+  f:write(encoded)
+  f:close()
+end
+
+-- Pull any persisted state into memory. Called once, at require time.
+local function restore_state()
+  local c = read_cache()
+  if not c then return end
+  -- Only treat it as usable data if a window is actually present; a failed
+  -- fetch persists an empty table, which must not masquerade as a reading.
+  if type(c.data) == "table" and (c.data.five_hour or c.data.seven_day) then
+    cached = c.data
+    last_fetch = tonumber(c.fetched_at) or 0
+  end
+  retry_until = tonumber(c.retry_until) or 0
+  error_streak = tonumber(c.error_streak) or 0
+  last_error = c.last_error
 end
 
 -- ----------------------------------------------------------- credentials --
@@ -167,9 +217,12 @@ end
 
 -- ------------------------------------------------------------------- api --
 
+-- Returns body, http_code, error, retry_after_secs.
+-- -D - writes the response headers to stdout ahead of the body so we can read
+-- Retry-After; the two are split on the blank line between them.
 local function call_api(token)
   local ok, stdout = run({
-    "curl", "-s", "-m", "5", "-w", "\n%{http_code}",
+    "curl", "-s", "-D", "-", "-m", "5", "-w", "\n%{http_code}",
     "https://api.anthropic.com/api/oauth/usage",
     "-H", "Authorization: Bearer " .. token,
     "-H", "anthropic-beta: oauth-2025-04-20",
@@ -177,11 +230,20 @@ local function call_api(token)
     "-H", "User-Agent: quotabar.wezterm",
   })
   if not ok or not stdout or stdout == "" then
-    return nil, nil, "curl failed"
+    return nil, nil, "curl failed", nil
   end
-  local body, code = stdout:match("^(.*)\n(%d+)$")
-  if not body then return stdout, nil, nil end
-  return body, tonumber(code), nil
+
+  local rest, code = stdout:match("^(.*)\n(%d+)$")
+  rest = rest or stdout
+
+  -- headers end at the first blank line; tolerate CRLF and LF
+  local headers, body = rest:match("^(.-)\r?\n\r?\n(.*)$")
+  if not headers then
+    headers, body = "", rest
+  end
+
+  local retry_after = tonumber(headers:match("[Rr]etry%-[Aa]fter:%s*(%d+)"))
+  return body, tonumber(code), nil, retry_after
 end
 
 -- --------------------------------------------------------------- parsing --
@@ -333,42 +395,80 @@ end
 
 -- ----------------------------------------------------------------- fetch --
 
+-- 1st failure waits one interval, then 2x, 4x, 8x, capped at 15 minutes.
+local function backoff_secs(streak)
+  local mult = 2 ^ math.min(math.max(streak, 1) - 1, 4)
+  return math.min(config.poll_interval_secs * mult, 900)
+end
+
+local function fail(now, message, wait)
+  error_streak = error_streak + 1
+  last_error = message
+  last_fetch = now
+  retry_until = now + (wait or backoff_secs(error_streak))
+  -- Keep showing the last good numbers if we have them; a transient failure
+  -- should not blank a bar that was correct a minute ago.
+  local shown = cached and not cached.error and cached or { error = message }
+  cached = shown
+  write_cache({
+    data = (shown.error and {} or shown),
+    fetched_at = last_fetch,
+    retry_until = retry_until,
+    error_streak = error_streak,
+    last_error = message,
+  })
+  return shown
+end
+
 local function fetch()
   local now = os.time()
+
+  -- honour any outstanding backoff before anything else
+  if now < retry_until then
+    if cached and (cached.five_hour or cached.seven_day) then
+      return cached   -- stale but real numbers beat an error message
+    end
+    return { error = last_error or "rate limited" }
+  end
   if cached and (now - last_fetch) < config.poll_interval_secs then
     return cached
   end
 
   local token, _, err = get_token()
   if not token then
-    last_fetch, last_error = now, err
-    cached = { error = err }
-    return cached
+    return fail(now, err)
   end
 
-  local body, code, curl_err = call_api(token)
-  last_fetch = now
+  local body, code, curl_err, retry_after = call_api(token)
 
   if curl_err then
-    cached = { error = curl_err }
-    return cached
+    return fail(now, curl_err)
+  end
+  if code == 429 then
+    -- The server told us to slow down. Respect Retry-After when it sends one,
+    -- otherwise back off exponentially.
+    return fail(now, "rate limited", retry_after)
   end
   if code and code ~= 200 then
-    cached = { error = "http " .. tostring(code) }
-    return cached
+    return fail(now, "http " .. tostring(code), retry_after)
   end
 
   local ok, parsed = pcall(wezterm.json_parse, body)
   if not ok or type(parsed) ~= "table" then
-    cached = { error = "bad response" }
-    return cached
+    return fail(now, "bad response")
   end
 
   last_error = nil
+  error_streak = 0
+  retry_until = 0
+  last_fetch = now
   cached = parsed
   if parsed.five_hour and parsed.five_hour.utilization then
     record_sample(parsed.five_hour.utilization)
   end
+  write_cache({
+    data = parsed, fetched_at = now, retry_until = 0, error_streak = 0,
+  })
   return cached
 end
 
@@ -391,6 +491,7 @@ end
 
 function M.apply_to_config(c, opts)
   if opts then config = deep_merge(config, opts) end
+  restore_state()
 
   if config.dashboard_key then
     local keys = c.keys or {}
@@ -428,6 +529,11 @@ M._internal = {
   resolve_credentials = resolve_credentials,
   wsl_home = wsl_home,
   fetch = fetch,
+  backoff_secs = backoff_secs,
+  cache_path = cache_path,
+  read_cache = read_cache,
+  write_cache = write_cache,
+  restore_state = restore_state,
   seconds_until = seconds_until,
   fmt_duration = fmt_duration,
   record_sample = record_sample,
