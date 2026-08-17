@@ -1,0 +1,7 @@
+# Keep LF endings everywhere, including on Windows.
+#
+# WezTerm clones plugins into its own cache and Git for Windows defaults to
+# core.autocrlf=true, which rewrites every line on checkout. The working tree
+# then differs from HEAD in its entirety, and `wezterm.plugin.update_all()`
+# refuses to fast-forward over "local changes" that the user never made.
+* -text
