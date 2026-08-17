@@ -72,6 +72,7 @@ quota.apply_to_config(config, {
   wsl_distro = nil,                -- nil = default distro
   bars = { enabled = true, width = 8, full = "█", empty = "░" },
   icons = { claude = "⚡", week = "▪", burn = "↑" },
+  inherit_theme_colors = true,     -- follow the terminal's ANSI palette
   colors = {
     ok = "#5eff6c", warn = "#f1ff5e", high = "#ffbd5e",
     crit = "#ff6e5e", dim = "#7b8496", text = "#ffffff",
@@ -79,6 +80,30 @@ quota.apply_to_config(config, {
   thresholds = { warn = 50, high = 75, crit = 90 },
 })
 ```
+
+### Colours
+
+By default the bar takes `ok`, `warn`, `crit` and `text` from your WezTerm
+colour scheme rather than the values above, so changing theme recolours the
+bar. It reads the ANSI slots by meaning — green for fine, yellow for getting
+on, red for trouble — preferring `brights`, which stay legible on dark
+backgrounds where the normal set goes muddy. `high` comes from `indexed[16]`
+(orange) when the theme sets one, else yellow.
+
+The `colors` table above is the fallback for themes that define no palette,
+and any colour you set there explicitly always wins:
+
+```lua
+-- follow the theme, but force one colour
+quota.apply_to_config(config, { colors = { ok = "#a5a5f5" } })
+
+-- ignore the theme entirely
+quota.apply_to_config(config, { inherit_theme_colors = false })
+```
+
+`dim` is deliberately not inherited: it is the empty half of the progress bar,
+and every ANSI slot that might stand in for it is a real colour that reads as
+a value rather than as absence.
 
 `Ctrl+Shift+U` opens the usage dashboard. Note it shadows WezTerm's built-in
 `CharSelect` (the Unicode picker) — pass a different `dashboard_key`, or

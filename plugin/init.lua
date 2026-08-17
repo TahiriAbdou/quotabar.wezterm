@@ -22,7 +22,11 @@ local config = {
   wsl_distro = nil,               -- nil = default distro
   bars = { enabled = true, width = 8, full = "█", empty = "░" },
   icons = { claude = "⚡", week = "▪", burn = "↑" },
-  colors = {                      -- cyberdream
+  -- Take ok/warn/high/crit/text from the terminal's own ANSI palette when it
+  -- defines one, so the bar follows a theme change. Anything set explicitly in
+  -- `colors` below still wins. Set false to use the values below verbatim.
+  inherit_theme_colors = true,
+  colors = {                      -- fallback: cyberdream
     ok    = "#5eff6c",
     warn  = "#f1ff5e",
     high  = "#ffbd5e",
@@ -489,8 +493,49 @@ local function deep_merge(base, override)
   return out
 end
 
+-- Pull the status colours out of the terminal's own palette, so the bar
+-- matches whatever theme is set rather than the cyberdream values baked in
+-- above. ANSI slots are used by meaning, not by name: green reads as "fine",
+-- yellow as "getting on", red as "trouble" in every palette worth using, so a
+-- theme swap recolours the bar without needing a per-theme mapping.
+--
+-- Only fills in what the user has not set explicitly: an override in
+-- `opts.colors` is a deliberate choice and must win over the theme.
+local function inherit_theme_colors(c, explicit)
+  local pal = c.colors
+  if type(pal) ~= "table" then return end
+  local ansi, brights = pal.ansi, pal.brights
+  if type(ansi) ~= "table" and type(brights) ~= "table" then return end
+
+  -- brights first: on dark themes the normal ANSI set is often too dim to read
+  -- against the tab bar.
+  local function slot(i)
+    local b = brights and brights[i]
+    local a = ansi and ansi[i]
+    return b or a
+  end
+
+  local from_theme = {
+    ok   = slot(3),  -- green
+    warn = slot(4),  -- yellow
+    crit = slot(2),  -- red
+    text = pal.foreground,
+  }
+  -- "high" sits between warn and crit. Most palettes have no orange slot, so
+  -- fall back to yellow rather than inventing a colour by blending.
+  from_theme.high = (pal.indexed and pal.indexed[16]) or slot(4)
+
+  for k, v in pairs(from_theme) do
+    if v and not explicit[k] then config.colors[k] = v end
+  end
+end
+
 function M.apply_to_config(c, opts)
+  local explicit_colors = (opts and type(opts.colors) == "table") and opts.colors or {}
   if opts then config = deep_merge(config, opts) end
+  if config.inherit_theme_colors then
+    inherit_theme_colors(c, explicit_colors)
+  end
   restore_state()
 
   if config.dashboard_key then
@@ -526,6 +571,8 @@ end
 
 -- exposed for testing
 M._internal = {
+  current_colors = function() return config.colors end,
+  inherit_theme_colors = inherit_theme_colors,
   resolve_credentials = resolve_credentials,
   wsl_home = wsl_home,
   fetch = fetch,
